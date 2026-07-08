@@ -1,0 +1,264 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum Role {
+  ADMIN
+  BA
+}
+
+enum ProjectStatus {
+  PLANNING
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum CaseStatus {
+  PENDING
+  ASSIGNED
+  WIP
+  COMPLETED
+  UAT
+  LIVE
+  REOPENED
+}
+
+enum BugStatus {
+  OPEN
+  ASSIGNED
+  WIP
+  RESOLVED
+  CLOSED
+  REOPENED
+}
+
+enum BugPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum TaskPriority {
+  CRITICAL
+  HIGH
+  MEDIUM
+  LOW
+}
+
+model LOB {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  createdAt DateTime  @default(now())
+  users     User[]
+  projects  Project[]
+  tasks     Task[]
+  bugs      Bug[]
+
+  @@map("lobs")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  role         Role     @default(BA)
+  lobId        String?  @map("lob_id")
+  lob          LOB?     @relation(fields: [lobId], references: [id])
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  projectsOwned Project[]        @relation("ProjectBA")
+  tasksCreated  Task[]           @relation("TaskCreatedBy")
+  bugsCreated   Bug[]            @relation("BugCreatedBy")
+  auditLogs     AuditLog[]
+  notifications Notification[]
+  importLogs    ExcelImportLog[]
+
+  @@map("users")
+}
+
+model Developer {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  email     String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+  tasks     Task[]
+  bugs      Bug[]
+
+  @@map("developers")
+}
+
+model Category {
+  id     String  @id @default(cuid())
+  name   String  @unique
+  active Boolean @default(true)
+  tasks  Task[]
+
+  @@map("categories")
+}
+
+model Project {
+  id              String        @id @default(cuid())
+  projectCode     String        @unique @map("project_code")
+  name            String
+  description     String?
+  status          ProjectStatus @default(PLANNING)
+  lobId           String        @map("lob_id")
+  lob             LOB           @relation(fields: [lobId], references: [id])
+  businessOwner   String?       @map("business_owner")
+  baId            String?       @map("ba_id")
+  ba              User?         @relation("ProjectBA", fields: [baId], references: [id])
+  startDate       DateTime?     @map("start_date")
+  expectedEndDate DateTime?     @map("expected_end_date")
+  remarks         String?
+  isDeleted       Boolean       @default(false) @map("is_deleted")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  tasks           Task[]
+  bugs            Bug[]
+
+  @@map("projects")
+}
+
+model Task {
+  id                  String     @id @default(cuid())
+  taskCode            String     @unique @map("task_code")
+  taskName            String?    @map("task_name")
+  projectId           String     @map("project_id")
+  project             Project    @relation(fields: [projectId], references: [id])
+  categoryId          String?    @map("category_id")
+  category            Category?  @relation(fields: [categoryId], references: [id])
+  caseStatus          CaseStatus @default(PENDING) @map("case_status")
+  priority             TaskPriority @default(MEDIUM)
+  lobId               String     @map("lob_id")
+  lob                 LOB        @relation(fields: [lobId], references: [id])
+  description         String?
+  requirementReceived DateTime?  @map("requirement_received")
+  requirementReceivedFrom  String?   @map("requirement_received_from")
+  businessReqReceivedDate  DateTime? @map("business_req_received_date")
+  developerReqReceivedDate DateTime? @map("developer_req_received_date")
+  deliveryDate        DateTime?  @map("delivery_date")
+  revisedDate         DateTime?  @map("revised_date")
+  reasonForDelay      String?    @map("reason_for_delay")
+  assignedTeam        String?    @map("assigned_team")
+  emailSubject        String?    @map("email_subject")
+  developerId         String?    @map("developer_id")
+  developer           Developer? @relation(fields: [developerId], references: [id])
+  developerAssignedAt DateTime?  @map("developer_assigned_at")
+  expectedEndDate     DateTime?  @map("expected_end_date")
+  actualCompletionAt  DateTime?  @map("actual_completion_at")
+  uatResult           String?    @map("uat_result")
+  remarks             String?
+  createdById         String     @map("created_by_id")
+  createdBy           User       @relation("TaskCreatedBy", fields: [createdById], references: [id])
+  isDeleted           Boolean    @default(false) @map("is_deleted")
+  createdAt           DateTime   @default(now()) @map("created_at")
+  updatedAt           DateTime   @updatedAt @map("updated_at")
+
+  statusHistory TaskStatusHistory[]
+  eedRevisions  EEDRevision[]
+
+  @@map("tasks")
+}
+
+model TaskStatusHistory {
+  id         String      @id @default(cuid())
+  taskId     String      @map("task_id")
+  task       Task        @relation(fields: [taskId], references: [id])
+  fromStatus CaseStatus? @map("from_status")
+  toStatus   CaseStatus  @map("to_status")
+  changedBy  String      @map("changed_by")
+  changedAt  DateTime    @default(now()) @map("changed_at")
+  note       String?
+
+  @@map("task_status_history")
+}
+
+model EEDRevision {
+  id              String   @id @default(cuid())
+  taskId          String   @map("task_id")
+  task            Task     @relation(fields: [taskId], references: [id])
+  oldDate         DateTime? @map("old_date")
+  newDate         DateTime @map("new_date")
+  managerApproved Boolean  @map("manager_approved")
+  reason          String
+  changedById     String   @map("changed_by_id")
+  changedByName   String   @map("changed_by_name")
+  changedAt       DateTime @default(now()) @map("changed_at")
+
+  @@map("eed_revisions")
+}
+
+model Bug {
+  id          String      @id @default(cuid())
+  bugCode     String      @unique @map("bug_code")
+  title       String
+  description String?
+  projectId   String?     @map("project_id")
+  project     Project?    @relation(fields: [projectId], references: [id])
+  lobId       String      @map("lob_id")
+  lob         LOB         @relation(fields: [lobId], references: [id])
+  status      BugStatus   @default(OPEN)
+  priority    BugPriority @default(MEDIUM)
+  developerId String?     @map("developer_id")
+  developer   Developer?  @relation(fields: [developerId], references: [id])
+  createdById String      @map("created_by_id")
+  createdBy   User        @relation("BugCreatedBy", fields: [createdById], references: [id])
+  isDeleted   Boolean     @default(false) @map("is_deleted")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  updatedAt   DateTime    @updatedAt @map("updated_at")
+
+  @@map("bugs")
+}
+
+model ExcelImportLog {
+  id           String   @id @default(cuid())
+  fileName     String   @map("file_name")
+  uploadedById String   @map("uploaded_by_id")
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+  totalRows    Int      @map("total_rows")
+  imported     Int
+  skipped      Int
+  overwritten  Int
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("excel_import_logs")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  entity    String
+  entityId  String   @map("entity_id")
+  field     String?
+  oldValue  String?  @map("old_value")
+  newValue  String?  @map("new_value")
+  userId    String?  @map("user_id")
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("audit_logs")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id])
+  message   String
+  type      String?
+  isRead    Boolean  @default(false) @map("is_read")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("notifications")
+}
