@@ -1,7 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-
+const app = express();
 app.use(
   cors({
     origin: [
@@ -11,6 +11,8 @@ app.use(
     credentials: true,
   })
 );
+
+app.use(express.json({ limit: "15mb" }));
 
 const authRoutes = require("./routes/auth");
 const masterRoutes = require("./routes/masters");
@@ -22,9 +24,7 @@ const dashboardRoutes = require("./routes/dashboard");
 const reportRoutes = require("./routes/reports");
 const miscRoutes = require("./routes/misc");
 
-const app = express();
 
-app.use(express.json({ limit: "15mb" }));
 
 app.get("/api/health", (req, res) => res.json({ status: "ok", service: "Project Master API" }));
 
