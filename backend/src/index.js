@@ -9,8 +9,12 @@ app.use(
       process.env.FRONTEND_URL, // Vercel production URL
     ],
     credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
+
+app.use(cors(corsOptions));
 
 app.use(express.json({ limit: "15mb" }));
 
