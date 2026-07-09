@@ -91,12 +91,13 @@ router.post("/", auth, async (req, res) => {
 
 const DATE_FIELDS = new Set([
   "requirementReceived", "businessReqReceivedDate", "developerReqReceivedDate",
-  "deliveryDate",
+  "deliveryDate", "revisedDate",
 ]);
+const NULLABLE_RELATION_FIELDS = new Set(["categoryId"]);
 const EDITABLE_FIELDS = [
   "taskName", "categoryId", "emailSubject", "remarks", "requirementReceived",
   "description", "priority", "requirementReceivedFrom", "businessReqReceivedDate",
-  "developerReqReceivedDate", "deliveryDate", "reasonForDelay", "assignedTeam",
+  "developerReqReceivedDate", "deliveryDate", "revisedDate", "reasonForDelay", "assignedTeam",
 ];
 
 // BR-07: ownership-based editing (general field edits — Expected End Date is NOT editable here,
@@ -109,23 +110,22 @@ router.patch("/:id", auth, async (req, res) => {
   }
 
   const data = {};
-
-for (const f of EDITABLE_FIELDS) {
-  if (req.body[f] === undefined) continue;
-
-  if (DATE_FIELDS.has(f)) {
-    // Ignore empty date values ("", null)
-    if (!req.body[f]) continue;
-
-    const date = new Date(req.body[f]);
-
-    if (!isNaN(date.getTime())) {
-      data[f] = date;
+  for (const f of EDITABLE_FIELDS) {
+    if (req.body[f] === undefined) continue;
+    const v = req.body[f];
+    if (DATE_FIELDS.has(f)) {
+      data[f] = v ? new Date(v) : null; // "" from a cleared date input must become null, not stay ""
+    } else if (NULLABLE_RELATION_FIELDS.has(f)) {
+      data[f] = v ? v : null; // "" is not a valid foreign key — must be null
+    } else {
+      data[f] = v;
     }
-  } else {
-    data[f] = req.body[f];
   }
-}
+  console.log(`[PATCH /tasks/${task.id}] body:`, req.body);
+  console.log(`[PATCH /tasks/${task.id}] resolved data:`, data);
+  const updated = await prisma.task.update({ where: { id: task.id }, data });
+  await logAudit({ entity: "Task", entityId: task.id, action: "UPDATE", userId: req.user.id });
+  res.json(updated);
 });
 
 // BR-08: developer assignment - mandatory fields to move to Assigned

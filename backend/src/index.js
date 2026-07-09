@@ -1,6 +1,15 @@
 require("dotenv").config();
+require("express-async-errors");
 const express = require("express");
 const cors = require("cors");
+
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection:", err);
+});
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
+
 const app = express();
 app.use(
   cors({
@@ -16,6 +25,24 @@ app.use(
 
 
 app.use(express.json({ limit: "15mb" }));
+
+// Fail fast instead of hanging forever if a request (e.g. a stuck DB call) never resolves.
+app.use((req, res, next) => {
+  req.setTimeout(15000, () => {
+    if (!res.headersSent) res.status(503).json({ error: "Request timed out — database may be unreachable" });
+  });
+  next();
+});
+
+// Fail fast instead of hanging forever if the DB (or anything downstream) never responds.
+app.use((req, res, next) => {
+  res.setTimeout(15000, () => {
+    if (!res.headersSent) {
+      res.status(503).json({ error: "Request timed out — database may be unreachable" });
+    }
+  });
+  next();
+});
 
 const authRoutes = require("./routes/auth");
 const masterRoutes = require("./routes/masters");
@@ -42,8 +69,12 @@ app.use("/api/reports", reportRoutes);
 app.use("/api", miscRoutes);
 
 app.use((err, req, res, next) => {
-  console.error(err);
-  res.status(500).json({ error: "Internal server error" });
+  console.error(`[${req.method} ${req.originalUrl}]`, err);
+  const status = err.statusCode || 500;
+  res.status(status).json({
+    error: err.message || "Internal server error",
+    code: err.code || undefined,
+  });
 });
 
 const PORT = process.env.PORT || 4000;
