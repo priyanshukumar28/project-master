@@ -1,7 +1,7 @@
 const router = require("express").Router();
 const prisma = require("../prisma");
 const { auth, scopeLOB } = require("../middleware/auth");
-const { logAudit, notify, computeDeadlineStatus, genCode } = require("../utils/helpers");
+const { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode } = require("../utils/helpers");
 
 function withDeadline(task) {
   const { deadlineStatus, missedByDays } = computeDeadlineStatus(task);
@@ -86,6 +86,7 @@ router.post("/", auth, async (req, res) => {
   });
   await logAudit({ entity: "Task", entityId: task.id, action: "CREATE", userId: req.user.id, newValue: task.taskCode });
   if (project.baId) await notify(project.baId, `New task created in ${project.name}`, "TASK_CREATED");
+  await notifyAdmins(`New task created in ${project.name}: ${task.taskCode}`, "TASK_CREATED", req.user.id);
   res.status(201).json(task);
 });
 
@@ -247,6 +248,13 @@ router.post("/:id/status", auth, async (req, res) => {
       : `Task ${task.taskCode} moved to ${toStatus}`;
     await notify(task.createdById, msg, "STATUS_CHANGE");
   }
+  await notifyAdmins(
+    toStatus === "REOPENED"
+      ? `Task ${task.taskCode} was reopened: ${note.trim()}`
+      : `Task ${task.taskCode} moved to ${toStatus}`,
+    "STATUS_CHANGE",
+    req.user.id
+  );
   res.json(withDeadline(updated));
 });
 
@@ -286,6 +294,7 @@ router.post("/:id/revise-eed", auth, async (req, res) => {
   if (task.createdById) {
     await notify(task.createdById, `Deadline revised for task ${task.taskCode}`, "DEADLINE_REVISED");
   }
+  await notifyAdmins(`Deadline revised for task ${task.taskCode}`, "DEADLINE_REVISED", req.user.id);
 
   res.status(201).json({
     revision,

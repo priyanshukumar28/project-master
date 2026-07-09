@@ -19,6 +19,19 @@ async function notify(userId, message, type) {
   return prisma.notification.create({ data: { userId, message, type } });
 }
 
+// Fans a notification out to every active Admin (e.g. CTO). Skips excludeUserId so an admin
+// who personally triggered the action doesn't get a duplicate of their own notification.
+async function notifyAdmins(message, type, excludeUserId) {
+  const admins = await prisma.user.findMany({
+    where: { role: "ADMIN", active: true, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
+    select: { id: true },
+  });
+  if (!admins.length) return;
+  return prisma.notification.createMany({
+    data: admins.map((a) => ({ userId: a.id, message, type })),
+  });
+}
+
 // BR-12 / BR-13: derive deadline/SLA status for a task
 function computeDeadlineStatus(task) {
   const now = new Date();
@@ -59,4 +72,4 @@ function genCode(prefix) {
   return `${prefix}-${ts}${rand}`;
 }
 
-module.exports = { logAudit, notify, computeDeadlineStatus, genCode };
+module.exports = { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode };
