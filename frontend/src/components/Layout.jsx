@@ -4,9 +4,13 @@ import {
   FileBarChart, Users, ShieldCheck, LogOut, Bell, Menu, X,
 } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "../api/client";
 import logo from "../assets/aa-logo.jpg";
+import NotificationToasts from "./NotificationToasts";
+import { playNotificationChime } from "../utils/sound";
+
+const POLL_INTERVAL_MS = 20000;
 
 const NAV = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true },
@@ -115,10 +119,38 @@ export default function Layout() {
   const [notifOpen, setNotifOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [notifications, setNotifications] = useState([]);
+  const [toasts, setToasts] = useState([]);
+  const seenIds = useRef(new Set());
+  const isFirstLoad = useRef(true);
+
+  const fetchNotifications = () => {
+    api.get("/notifications").then((r) => {
+      const list = r.data;
+      setNotifications(list);
+
+      if (isFirstLoad.current) {
+        // Don't toast/chime for the backlog that already existed before this session started.
+        list.forEach((n) => seenIds.current.add(n.id));
+        isFirstLoad.current = false;
+        return;
+      }
+
+      const freshUnseen = list.filter((n) => !seenIds.current.has(n.id));
+      if (freshUnseen.length) {
+        freshUnseen.forEach((n) => seenIds.current.add(n.id));
+        playNotificationChime();
+        setToasts((prev) => [...prev, ...freshUnseen.map((n) => ({ id: n.id, message: n.message }))]);
+      }
+    }).catch(() => {});
+  };
 
   useEffect(() => {
-    api.get("/notifications").then((r) => setNotifications(r.data)).catch(() => {});
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, POLL_INTERVAL_MS);
+    return () => clearInterval(interval);
   }, []);
+
+  const dismissToast = (id) => setToasts((prev) => prev.filter((t) => t.id !== id));
 
   useEffect(() => { setMobileOpen(false); }, [location.pathname]);
 
@@ -131,6 +163,8 @@ export default function Layout() {
 
   return (
     <div className="min-h-screen flex bg-paper-50">
+      <NotificationToasts toasts={toasts} onDismiss={dismissToast} />
+
       {/* Desktop sidebar */}
       <aside className="hidden lg:flex w-64 shrink-0 bg-ink-900 text-white flex-col">
         <SidebarContent />
