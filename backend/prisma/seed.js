@@ -15,11 +15,6 @@ async function seed() {
     await prisma.category.upsert({ where: { name }, update: {}, create: { name } });
   }
 
-  const developers = ["Rahul Sharma", "Ananya Iyer", "Vikram Singh", "Neha Gupta", "Arjun Mehta"];
-  for (const name of developers) {
-    await prisma.developer.upsert({ where: { name }, update: {}, create: { name } });
-  }
-
   const adminHash = await bcrypt.hash("Admin@123", 10);
   await prisma.user.upsert({
     where: { email: "admin@acrossassist.com" },
