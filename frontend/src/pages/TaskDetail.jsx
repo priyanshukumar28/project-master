@@ -206,6 +206,7 @@ function toInputDate(d) {
 function EditModal({ task, categories, open, onClose, onDone }) {
   const [form, setForm] = useState(null);
   const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!task) return;
@@ -232,13 +233,19 @@ function EditModal({ task, categories, open, onClose, onDone }) {
 
   const submit = async (e) => {
     e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
     setError("");
     try {
       await api.patch(`/tasks/${task.id}`, form);
       onClose();
       onDone();
     } catch (err) {
-      setError(err.response?.data?.error || "Could not save changes");
+      console.error("Task update failed:", err.response?.data || err.message, err);
+      const d = err.response?.data;
+      setError(d?.error ? `${d.error}${d.code ? ` (${d.code})` : ""}` : "Could not save changes — check console for details");
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -311,8 +318,8 @@ function EditModal({ task, categories, open, onClose, onDone }) {
           <textarea rows={2} value={form.remarks} onChange={set("remarks")} className="w-full px-3.5 py-2.5 rounded-xl border border-line-200 text-sm focus-ring" />
         </div>
         {error && <div className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg">{error}</div>}
-        <button type="submit" className="w-full bg-aa-blue-600 hover:bg-aa-blue-700 text-white font-semibold py-2.5 rounded-xl focus-ring press-scale">
-          Save Changes
+        <button type="submit" disabled={submitting} className="w-full bg-aa-blue-600 hover:bg-aa-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl focus-ring press-scale">
+          {submitting ? "Saving…" : "Save Changes"}
         </button>
       </form>
     </Modal>
