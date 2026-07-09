@@ -72,4 +72,34 @@ function genCode(prefix) {
   return `${prefix}-${ts}${rand}`;
 }
 
-module.exports = { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode };
+function slugFromName(name) {
+  return (name || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "GEN";
+}
+
+async function ensureLobCode(lob) {
+  if (lob.code) return lob.code;
+  let code = slugFromName(lob.name);
+  let n = 1;
+  // Guard against colliding with another LOB's existing code.
+  while (await prisma.lOB.findFirst({ where: { code, id: { not: lob.id } } })) {
+    n++;
+    code = `${slugFromName(lob.name)}${n}`;
+  }
+  await prisma.lOB.update({ where: { id: lob.id }, data: { code } });
+  return code;
+}
+
+// LOB-scoped, gap-free sequential codes, e.g. PRJ-RSA-0001, TSK-RSA-0001.
+// Uses a single atomic UPDATE ... increment, so it's safe under concurrent requests.
+async function nextProjectCode(lobId) {
+  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { projectSeq: { increment: 1 } } });
+  const code = await ensureLobCode(lob);
+  return `PRJ-${code}-${String(lob.projectSeq).padStart(4, "0")}`;
+}
+async function nextTaskCode(lobId) {
+  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { taskSeq: { increment: 1 } } });
+  const code = await ensureLobCode(lob);
+  return `TSK-${code}-${String(lob.taskSeq).padStart(4, "0")}`;
+}
+
+module.exports = { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode, nextProjectCode, nextTaskCode };

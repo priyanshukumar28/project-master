@@ -1,49 +1,105 @@
-const router = require("express").Router();
 const prisma = require("../prisma");
-const { auth, requireAdmin } = require("../middleware/auth");
 
-// LOB
-router.get("/lobs", auth, async (req, res) => {
-  res.json(await prisma.lOB.findMany({ orderBy: { name: "asc" } }));
-});
-router.post("/lobs", auth, requireAdmin, async (req, res) => {
-  try {
-    res.status(201).json(await prisma.lOB.create({ data: { name: req.body.name } }));
-  } catch {
-    res.status(400).json({ error: "LOB already exists" });
+async function logAudit({ entity, entityId, field, oldValue, newValue, userId, action }) {
+  return prisma.auditLog.create({
+    data: {
+      entity,
+      entityId,
+      field: field || null,
+      oldValue: oldValue === undefined || oldValue === null ? null : String(oldValue),
+      newValue: newValue === undefined || newValue === null ? null : String(newValue),
+      userId: userId || null,
+      action,
+    },
+  });
+}
+
+async function notify(userId, message, type) {
+  if (!userId) return;
+  return prisma.notification.create({ data: { userId, message, type } });
+}
+
+// Fans a notification out to every active Admin (e.g. CTO). Skips excludeUserId so an admin
+// who personally triggered the action doesn't get a duplicate of their own notification.
+async function notifyAdmins(message, type, excludeUserId) {
+  const admins = await prisma.user.findMany({
+    where: { role: "ADMIN", active: true, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
+    select: { id: true },
+  });
+  if (!admins.length) return;
+  return prisma.notification.createMany({
+    data: admins.map((a) => ({ userId: a.id, message, type })),
+  });
+}
+
+// BR-12 / BR-13: derive deadline/SLA status for a task
+function computeDeadlineStatus(task) {
+  const now = new Date();
+  const eed = task.expectedEndDate ? new Date(task.expectedEndDate) : null;
+  const isComplete = task.caseStatus === "LIVE";
+
+  if (!eed) return { deadlineStatus: "NOT_SCHEDULED", missedByDays: null };
+
+  if (isComplete) {
+    // Prefer the real delivery date (from the tracker / import) over actualCompletionAt
+    // (only set when the app itself drives the LIVE transition) over "now" as a last resort.
+    const reference = task.deliveryDate || task.actualCompletionAt || now;
+    const completedAt = new Date(reference);
+    const eedDay = eed.toDateString();
+    const completedDay = completedAt.toDateString();
+
+    // Same calendar day as Expected End Date = on time, no matter what the clock says.
+    if (completedDay === eedDay) return { deadlineStatus: "COMPLETED_ON_TIME", missedByDays: 0 };
+
+    const diffDays = Math.floor((new Date(completedDay) - new Date(eedDay)) / (1000 * 60 * 60 * 24));
+    if (diffDays > 0) return { deadlineStatus: "COMPLETED_LATE", missedByDays: diffDays };
+    return { deadlineStatus: "COMPLETED_ON_TIME", missedByDays: 0 };
   }
-});
 
-// Categories (BR-06, NFR-05: configurable without code change)
-router.get("/categories", auth, async (req, res) => {
-  res.json(await prisma.category.findMany({ where: { active: true }, orderBy: { name: "asc" } }));
-});
-router.post("/categories", auth, requireAdmin, async (req, res) => {
-  try {
-    res.status(201).json(await prisma.category.create({ data: { name: req.body.name } }));
-  } catch {
-    res.status(400).json({ error: "Category already exists" });
+  const today = new Date(now.toDateString());
+  const dueDate = new Date(eed.toDateString());
+  if (dueDate.getTime() === today.getTime()) return { deadlineStatus: "DUE_TODAY", missedByDays: 0 };
+  if (dueDate.getTime() < today.getTime()) {
+    const diffDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
+    return { deadlineStatus: "OVERDUE", missedByDays: diffDays };
   }
-});
-router.patch("/categories/:id", auth, requireAdmin, async (req, res) => {
-  res.json(await prisma.category.update({ where: { id: req.params.id }, data: req.body }));
-});
+  return { deadlineStatus: "ON_TRACK", missedByDays: null };
+}
 
-// Developers (referenced, not system users - Section 9.1)
-router.get("/developers", auth, async (req, res) => {
-  res.json(await prisma.developer.findMany({ where: { active: true }, orderBy: { name: "asc" } }));
-});
-router.post("/developers", auth, requireAdmin, async (req, res) => {
-  try {
-    res.status(201).json(
-      await prisma.developer.create({ data: { name: req.body.name, email: req.body.email || null } })
-    );
-  } catch {
-    res.status(400).json({ error: "Developer already exists" });
+function genCode(prefix) {
+  const ts = Date.now().toString(36).toUpperCase();
+  const rand = Math.floor(Math.random() * 900 + 100);
+  return `${prefix}-${ts}${rand}`;
+}
+
+function slugFromName(name) {
+  return (name || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "GEN";
+}
+
+async function ensureLobCode(lob) {
+  if (lob.code) return lob.code;
+  let code = slugFromName(lob.name);
+  let n = 1;
+  // Guard against colliding with another LOB's existing code.
+  while (await prisma.lOB.findFirst({ where: { code, id: { not: lob.id } } })) {
+    n++;
+    code = `${slugFromName(lob.name)}${n}`;
   }
-});
-router.patch("/developers/:id", auth, requireAdmin, async (req, res) => {
-  res.json(await prisma.developer.update({ where: { id: req.params.id }, data: req.body }));
-});
+  await prisma.lOB.update({ where: { id: lob.id }, data: { code } });
+  return code;
+}
 
-module.exports = router;
+// LOB-scoped, gap-free sequential codes, e.g. PRJ-RSA-0001, TSK-RSA-0001.
+// Uses a single atomic UPDATE ... increment, so it's safe under concurrent requests.
+async function nextProjectCode(lobId) {
+  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { projectSeq: { increment: 1 } } });
+  const code = await ensureLobCode(lob);
+  return `PRJ-${code}-${String(lob.projectSeq).padStart(4, "0")}`;
+}
+async function nextTaskCode(lobId) {
+  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { taskSeq: { increment: 1 } } });
+  const code = await ensureLobCode(lob);
+  return `TSK-${code}-${String(lob.taskSeq).padStart(4, "0")}`;
+}
+
+module.exports = { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode, nextProjectCode, nextTaskCode };

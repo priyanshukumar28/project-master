@@ -5,6 +5,7 @@ import { Download, Loader2 } from "lucide-react";
 
 const REPORTS = [
   { type: "project", label: "Project Report" },
+  { type: "projectBreakdown", label: "Project Breakdown (by Category)" },
   { type: "pending", label: "Pending Tasks" },
   { type: "completed", label: "Completed Tasks" },
   { type: "deadline", label: "Deadline Report" },
@@ -43,7 +44,7 @@ export default function Reports() {
     }
   };
 
-  const columns = rows?.[0] ? Object.keys(rows[0]) : [];
+  const columns = rows ? [...new Set(rows.flatMap((r) => Object.keys(r)))] : [];
 
   return (
     <div className="space-y-5">

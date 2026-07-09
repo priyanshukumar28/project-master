@@ -1,271 +1,264 @@
 const router = require("express").Router();
+const multer = require("multer");
+const ExcelJS = require("exceljs");
 const prisma = require("../prisma");
 const { auth, scopeLOB } = require("../middleware/auth");
-const { logAudit, notify, computeDeadlineStatus, genCode } = require("../utils/helpers");
+const { logAudit, nextProjectCode, nextTaskCode } = require("../utils/helpers");
 
-function withDeadline(task) {
-  const { deadlineStatus, missedByDays } = computeDeadlineStatus(task);
-  return { ...task, deadlineStatus, missedByDays };
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// Matches the real LOB tracker sheets (e.g. Auto, Gadget, Travel). LOB itself is NOT a column —
+// each tracker sheet belongs to one LOB, selected by the uploader in the wizard.
+const EXPECTED_HEADERS = [
+  "Project Name/Module",
+  "Email Subject",
+  "Description",
+  "Category",
+  "Status",
+  "Priority",
+  "Requirement Rec. From",
+  "Business Req. Rec. Date",
+  "Developer Req. Received Date",
+  "Delivery Date",
+  "Start Date (Developer)",
+  "Expected End Date",
+  "Assigned Team/Developer",
+  "Revised date",
+  "Reason For Delay",
+  "Remarks",
+];
+// Minimum columns required to treat a sheet as a valid data sheet (rest are optional/nullable).
+const REQUIRED_HEADERS = ["Project Name/Module", "Category", "Status"];
+
+const STATUS_MAP = {
+  pending: "PENDING", pipeline: "PENDING", open: "PENDING", "new": "PENDING",
+  assigned: "ASSIGNED",
+  wip: "WIP", "work in progress": "WIP", "in progress": "WIP",
+  completed: "COMPLETED", "dev completed": "COMPLETED",
+  uat: "UAT",
+  live: "LIVE", closed: "LIVE", done: "LIVE", deployed: "LIVE",
+  reopened: "REOPENED", "re-opened": "REOPENED",
+};
+const PRIORITY_MAP = { critical: "CRITICAL", high: "HIGH", medium: "MEDIUM", low: "LOW" };
+
+function excelDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v;
+  const d = new Date(v);
+  return isNaN(d.getTime()) ? null : d;
 }
 
-// BR-22: search & filters
-router.get("/", auth, async (req, res) => {
-  const { search, status, category, developerId, projectId, deadline } = req.query;
-  const where = { isDeleted: false, ...scopeLOB(req) };
-  if (status) where.caseStatus = status;
-  if (category) where.categoryId = category;
-  if (developerId) where.developerId = developerId;
-  if (projectId) where.projectId = projectId;
-  if (search) {
-    where.OR = [
-      { taskName: { contains: search, mode: "insensitive" } },
-      { taskCode: { contains: search, mode: "insensitive" } },
-      { emailSubject: { contains: search, mode: "insensitive" } },
-    ];
+function findDataSheet(workbook) {
+  for (const sheet of workbook.worksheets) {
+    const headerRow = sheet.getRow(1).values.slice(1).map((h) => (h ? String(h).trim() : ""));
+    const hasRequired = REQUIRED_HEADERS.every((h) => headerRow.includes(h));
+    if (hasRequired) return { sheet, headerRow };
+  }
+  return null;
+}
+
+// Step 1+2: upload & validate headers, Step 3: return preview with duplicate flags
+// Requires ?lobId= (or body field lobId via multipart) since the tracker sheet carries no LOB column.
+router.post("/preview", auth, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+  const { lobId } = req.body;
+  if (!lobId) return res.status(400).json({ error: "Select the Line of Business this tracker belongs to" });
+
+  const lob = await prisma.lOB.findUnique({ where: { id: lobId } });
+  if (!lob) return res.status(404).json({ error: "Line of Business not found" });
+  if (req.user.role === "BA" && lobId !== req.user.lobId) {
+    return res.status(403).json({ error: "BA can only import trackers for their own LOB" });
   }
 
-  const tasks = await prisma.task.findMany({
-    where,
-    include: {
-      project: { select: { id: true, name: true, projectCode: true } },
-      category: true,
-      developer: true,
-      lob: true,
-    },
-    orderBy: { createdAt: "desc" },
-  });
-
-  let result = tasks.map(withDeadline);
-  if (deadline) result = result.filter((t) => t.deadlineStatus === deadline);
-  res.json(result);
-});
-
-router.get("/:id", auth, async (req, res) => {
-  const task = await prisma.task.findFirst({
-    where: { id: req.params.id, isDeleted: false, ...scopeLOB(req) },
-    include: {
-      project: true,
-      category: true,
-      developer: true,
-      lob: true,
-      statusHistory: { orderBy: { changedAt: "asc" } },
-      eedRevisions: { orderBy: { changedAt: "desc" } },
-    },
-  });
-  if (!task) return res.status(404).json({ error: "Task not found" });
-  res.json(withDeadline(task));
-});
-
-// BR-05: task creation
-router.post("/", auth, async (req, res) => {
-  const { projectId, taskName, categoryId, requirementReceived, emailSubject, remarks, lobId } = req.body;
-  if (!projectId) return res.status(400).json({ error: "projectId is required" });
-
-  const project = await prisma.project.findFirst({ where: { id: projectId, isDeleted: false } });
-  if (!project) return res.status(404).json({ error: "Project not found" });
-  if (req.user.role === "BA" && project.lobId !== req.user.lobId) {
-    return res.status(403).json({ error: "BA can only create tasks in their own LOB" });
+  const ext = req.file.originalname.split(".").pop().toLowerCase();
+  if (!["xlsx", "xls"].includes(ext)) {
+    return res.status(400).json({ error: "Only .xlsx and .xls files are supported (BR-16)" });
   }
 
-  const task = await prisma.task.create({
-    data: {
-      taskCode: genCode("TSK"),
-      taskName: taskName || null,
-      projectId,
-      categoryId: categoryId || null,
-      lobId: lobId || project.lobId,
-      requirementReceived: requirementReceived ? new Date(requirementReceived) : null,
-      emailSubject: emailSubject || null,
-      remarks: remarks || null,
-      createdById: req.user.id,
-      caseStatus: "PENDING",
-    },
-  });
-  await prisma.taskStatusHistory.create({
-    data: { taskId: task.id, toStatus: "PENDING", changedBy: req.user.name },
-  });
-  await logAudit({ entity: "Task", entityId: task.id, action: "CREATE", userId: req.user.id, newValue: task.taskCode });
-  if (project.baId) await notify(project.baId, `New task created in ${project.name}`, "TASK_CREATED");
-  res.status(201).json(task);
-});
-
-const DATE_FIELDS = new Set([
-  "requirementReceived", "businessReqReceivedDate", "developerReqReceivedDate",
-  "deliveryDate", "revisedDate",
-]);
-const NULLABLE_RELATION_FIELDS = new Set(["categoryId"]);
-const EDITABLE_FIELDS = [
-  "taskName", "categoryId", "emailSubject", "remarks", "requirementReceived",
-  "description", "priority", "requirementReceivedFrom", "businessReqReceivedDate",
-  "developerReqReceivedDate", "deliveryDate", "revisedDate", "reasonForDelay", "assignedTeam",
-];
-
-// BR-07: ownership-based editing (general field edits — Expected End Date is NOT editable here,
-// it must go through /revise-eed to preserve the approval-aware audit trail per BR-09/10/11)
-router.patch("/:id", auth, async (req, res) => {
-  const task = await prisma.task.findFirst({ where: { id: req.params.id, isDeleted: false } });
-  if (!task) return res.status(404).json({ error: "Task not found" });
-  if (req.user.role === "BA" && task.createdById !== req.user.id && task.lobId !== req.user.lobId) {
-    return res.status(403).json({ error: "Not authorized to edit this task" });
+  const wb = new ExcelJS.Workbook();
+  try {
+    await wb.xlsx.load(req.file.buffer);
+  } catch (e) {
+    return res.status(400).json({ error: "Could not parse the file. Please upload a valid Excel file." });
   }
 
-  const data = {};
-  for (const f of EDITABLE_FIELDS) {
-    if (req.body[f] === undefined) continue;
-    const v = req.body[f];
-    if (DATE_FIELDS.has(f)) {
-      data[f] = v ? new Date(v) : null; // "" from a cleared date input must become null, not stay ""
-    } else if (NULLABLE_RELATION_FIELDS.has(f)) {
-      data[f] = v ? v : null; // "" is not a valid foreign key — must be null
-    } else {
-      data[f] = v;
-    }
-  }
-  console.log(`[PATCH /tasks/${task.id}] body:`, req.body);
-  console.log(`[PATCH /tasks/${task.id}] resolved data:`, data);
-  const updated = await prisma.task.update({ where: { id: task.id }, data });
-  await logAudit({ entity: "Task", entityId: task.id, action: "UPDATE", userId: req.user.id });
-  res.json(updated);
-});
-
-// BR-08: developer assignment - mandatory fields to move to Assigned
-router.post("/:id/assign", auth, async (req, res) => {
-  const { developerId, developerAssignedAt, expectedEndDate } = req.body;
-  if (!developerId || !developerAssignedAt || !expectedEndDate) {
+  const found = findDataSheet(wb);
+  if (!found) {
     return res.status(400).json({
-      error: "developerId, developerAssignedAt, and expectedEndDate are all required before assignment (BR-08)",
+      error: `No sheet found with the required columns: ${REQUIRED_HEADERS.join(", ")}`,
+      expectedHeaders: EXPECTED_HEADERS,
     });
   }
-  const task = await prisma.task.findFirst({ where: { id: req.params.id, isDeleted: false } });
-  if (!task) return res.status(404).json({ error: "Task not found" });
+  const { sheet, headerRow } = found;
+  const colIdx = {};
+  headerRow.forEach((h, i) => (colIdx[h] = i + 1));
 
-  const updated = await prisma.task.update({
-    where: { id: task.id },
+  const existingProjects = await prisma.project.findMany({ select: { name: true } });
+  const existingProjectNames = new Set(existingProjects.map((p) => p.name.toLowerCase()));
+
+  const rows = [];
+  sheet.eachRow((row, rowNumber) => {
+    if (rowNumber === 1) return;
+    const get = (h) => {
+      if (!colIdx[h]) return "";
+      const v = row.getCell(colIdx[h]).value;
+      if (v && v.text) return v.text;
+      if (v && v.result !== undefined) return v.result;
+      return v !== null && v !== undefined ? v : "";
+    };
+    const str = (h) => (get(h) ? String(get(h)).trim() : "");
+
+    const projectName = str("Project Name/Module");
+    if (!projectName) return;
+
+    rows.push({
+      rowNumber,
+      projectName,
+      emailSubject: str("Email Subject"),
+      description: str("Description"),
+      category: str("Category"),
+      status: str("Status"),
+      priority: str("Priority"),
+      requirementReceivedFrom: str("Requirement Rec. From"),
+      businessReqReceivedDate: excelDate(get("Business Req. Rec. Date")),
+      developerReqReceivedDate: excelDate(get("Developer Req. Received Date")),
+      deliveryDate: excelDate(get("Delivery Date")),
+      startDateDeveloper: excelDate(get("Start Date (Developer)")),
+      expectedEndDate: excelDate(get("Expected End Date")),
+      assignedTeam: str("Assigned Team/Developer"),
+      revisedDate: excelDate(get("Revised date")),
+      reasonForDelay: str("Reason For Delay"),
+      remarks: str("Remarks"),
+      isNewProject: !existingProjectNames.has(projectName.toLowerCase()),
+    });
+  });
+
+  // BR-18: duplicate detection on Project Name + Email Subject + a received date, within the target LOB
+  const existingTasks = await prisma.task.findMany({
+    where: { lobId },
+    include: { project: true },
+  });
+  const existingKeys = new Set(
+    existingTasks.map((t) =>
+      `${t.project?.name || ""}|${t.emailSubject || ""}|${
+        t.developerReqReceivedDate ? new Date(t.developerReqReceivedDate).toDateString() : ""
+      }`.toLowerCase()
+    )
+  );
+
+  for (const r of rows) {
+    const key = `${r.projectName}|${r.emailSubject}|${
+      r.developerReqReceivedDate ? new Date(r.developerReqReceivedDate).toDateString() : ""
+    }`.toLowerCase();
+    r.isDuplicate = existingKeys.has(key);
+  }
+
+  res.json({ totalRows: rows.length, rows, fileName: req.file.originalname, sheetName: sheet.name, lobId, lobName: lob.name });
+});
+
+// Step 4: commit import. body: { fileName, lobId, rows: [{...row, action: 'import'|'skip'|'overwrite'}] }
+router.post("/import", auth, async (req, res) => {
+  const { fileName, lobId, rows } = req.body;
+  if (!Array.isArray(rows)) return res.status(400).json({ error: "rows array required" });
+  if (!lobId) return res.status(400).json({ error: "lobId is required" });
+
+  const lob = await prisma.lOB.findUnique({ where: { id: lobId } });
+  if (!lob) return res.status(404).json({ error: "Line of Business not found" });
+  if (req.user.role === "BA" && lobId !== req.user.lobId) {
+    return res.status(403).json({ error: "BA can only import trackers for their own LOB" });
+  }
+
+  let imported = 0, skipped = 0, overwritten = 0;
+
+  for (const r of rows) {
+    if (r.action === "skip") { skipped++; continue; }
+
+    // BR-17: auto project creation (scoped by name; project itself still belongs to a single LOB)
+    let project = await prisma.project.findFirst({ where: { name: r.projectName } });
+    if (!project) {
+      const projectCode = await nextProjectCode(lobId);
+      project = await prisma.project.create({
+        data: {
+          projectCode,
+          name: r.projectName,
+          status: "ACTIVE",
+          description: "",
+          lobId,
+          startDate: new Date(),
+        },
+      });
+    }
+
+    let category = r.category ? await prisma.category.findFirst({ where: { name: r.category } }) : null;
+    if (r.category && !category) category = await prisma.category.create({ data: { name: r.category } });
+
+    // Assigned Team/Developer is free text in the legacy tracker (often multiple names) —
+    // stored as-is; it is not forced into the single-developer master used by the in-app workflow.
+    const caseStatus = STATUS_MAP[(r.status || "pending").toLowerCase().trim()] || "PENDING";
+    const priority = PRIORITY_MAP[(r.priority || "medium").toLowerCase().trim()] || "MEDIUM";
+
+    const taskData = {
+      taskName: null, // BR-19: legacy tracker has no distinct task-name column
+      projectId: project.id,
+      categoryId: category ? category.id : null,
+      lobId,
+      description: r.description || null,
+      emailSubject: r.emailSubject || null,
+      requirementReceivedFrom: r.requirementReceivedFrom || null,
+      businessReqReceivedDate: r.businessReqReceivedDate ? new Date(r.businessReqReceivedDate) : null,
+      developerReqReceivedDate: r.developerReqReceivedDate ? new Date(r.developerReqReceivedDate) : null,
+      deliveryDate: r.deliveryDate ? new Date(r.deliveryDate) : null,
+      // Keep actualCompletionAt consistent with the legacy tracker's Delivery Date for LIVE rows,
+      // so reports/history that key off actualCompletionAt (e.g. Monthly Report) still work for migrated data.
+      actualCompletionAt: caseStatus === "LIVE" && r.deliveryDate ? new Date(r.deliveryDate) : null,
+      developerAssignedAt: r.startDateDeveloper ? new Date(r.startDateDeveloper) : null,
+      expectedEndDate: r.expectedEndDate ? new Date(r.expectedEndDate) : null,
+      revisedDate: r.revisedDate ? new Date(r.revisedDate) : null,
+      reasonForDelay: r.reasonForDelay || null,
+      assignedTeam: r.assignedTeam || null,
+      caseStatus,
+      priority,
+      remarks: r.remarks || null,
+      createdById: req.user.id,
+    };
+
+    if (r.action === "overwrite" && r.isDuplicate) {
+      const existing = await prisma.task.findFirst({
+        where: { projectId: project.id, emailSubject: r.emailSubject || null, lobId },
+      });
+      if (existing) {
+        await prisma.task.update({ where: { id: existing.id }, data: taskData });
+        overwritten++;
+        continue;
+      }
+    }
+
+    const taskCode = await nextTaskCode(lobId);
+    await prisma.task.create({ data: { ...taskData, taskCode } });
+    imported++;
+  }
+
+  const log = await prisma.excelImportLog.create({
     data: {
-      developerId,
-      developerAssignedAt: new Date(developerAssignedAt),
-      expectedEndDate: new Date(expectedEndDate),
-      caseStatus: "ASSIGNED",
+      fileName: fileName || "upload.xlsx",
+      uploadedById: req.user.id,
+      totalRows: rows.length,
+      imported,
+      skipped,
+      overwritten,
     },
   });
-  await prisma.taskStatusHistory.create({
-    data: { taskId: task.id, fromStatus: task.caseStatus, toStatus: "ASSIGNED", changedBy: req.user.name },
-  });
-  await logAudit({ entity: "Task", entityId: task.id, action: "ASSIGN", userId: req.user.id, newValue: developerId });
-  res.json(updated);
+  await logAudit({ entity: "ExcelImportLog", entityId: log.id, action: "IMPORT", userId: req.user.id, newValue: lob.name });
+
+  res.json({ imported, skipped, overwritten, total: rows.length });
 });
 
-// Status workflow transition (Pending -> Assigned -> WIP -> Completed -> UAT -> Live, or Reopened)
-const VALID_TRANSITIONS = {
-  PENDING: ["ASSIGNED"],
-  ASSIGNED: ["WIP"],
-  WIP: ["COMPLETED"],
-  COMPLETED: ["UAT"],
-  UAT: ["LIVE", "REOPENED"],
-  LIVE: ["REOPENED"],
-  REOPENED: ["WIP"],
-};
-
-router.post("/:id/status", auth, async (req, res) => {
-  const { toStatus, uatResult, note } = req.body;
-  const task = await prisma.task.findFirst({ where: { id: req.params.id, isDeleted: false } });
-  if (!task) return res.status(404).json({ error: "Task not found" });
-
-  const allowed = VALID_TRANSITIONS[task.caseStatus] || [];
-  if (!allowed.includes(toStatus)) {
-    return res.status(400).json({ error: `Cannot move from ${task.caseStatus} to ${toStatus}` });
-  }
-  if (toStatus === "ASSIGNED" && (!task.developerId || !task.developerAssignedAt || !task.expectedEndDate)) {
-    return res.status(400).json({ error: "Developer assignment fields must be set first (BR-08)" });
-  }
-
-  const data = { caseStatus: toStatus };
-  if (toStatus === "UAT" && uatResult) data.uatResult = uatResult;
-  if (toStatus === "LIVE") data.actualCompletionAt = new Date();
-  if (toStatus === "REOPENED") data.actualCompletionAt = null;
-
-  const updated = await prisma.task.update({ where: { id: task.id }, data });
-  await prisma.taskStatusHistory.create({
-    data: { taskId: task.id, fromStatus: task.caseStatus, toStatus, changedBy: req.user.name, note: note || null },
+router.get("/logs", auth, async (req, res) => {
+  const logs = await prisma.excelImportLog.findMany({
+    include: { uploadedBy: { select: { name: true } } },
+    orderBy: { createdAt: "desc" },
   });
-  await logAudit({
-    entity: "Task",
-    entityId: task.id,
-    field: "caseStatus",
-    oldValue: task.caseStatus,
-    newValue: toStatus,
-    userId: req.user.id,
-    action: "STATUS_CHANGE",
-  });
-  if (task.createdById) {
-    await notify(task.createdById, `Task ${task.taskCode} moved to ${toStatus}`, "STATUS_CHANGE");
-  }
-  res.json(withDeadline(updated));
-});
-
-// BR-09/10/11: Expected End Date revision workflow
-router.post("/:id/revise-eed", auth, async (req, res) => {
-  const { newDate, managerApproved, reason } = req.body;
-  if (!newDate || managerApproved === undefined || !reason) {
-    return res.status(400).json({ error: "newDate, managerApproved, and reason are required" });
-  }
-  const task = await prisma.task.findFirst({ where: { id: req.params.id, isDeleted: false } });
-  if (!task) return res.status(404).json({ error: "Task not found" });
-
-  const revision = await prisma.eEDRevision.create({
-    data: {
-      taskId: task.id,
-      oldDate: task.expectedEndDate,
-      newDate: new Date(newDate),
-      managerApproved: !!managerApproved,
-      reason,
-      changedById: req.user.id,
-      changedByName: req.user.name,
-    },
-  });
-  const updated = await prisma.task.update({
-    where: { id: task.id },
-    data: { expectedEndDate: new Date(newDate) },
-  });
-  await logAudit({
-    entity: "Task",
-    entityId: task.id,
-    field: "expectedEndDate",
-    oldValue: task.expectedEndDate,
-    newValue: newDate,
-    userId: req.user.id,
-    action: "EED_REVISION",
-  });
-  if (task.createdById) {
-    await notify(task.createdById, `Deadline revised for task ${task.taskCode}`, "DEADLINE_REVISED");
-  }
-
-  res.status(201).json({
-    revision,
-    task: updated,
-    warning: managerApproved
-      ? null
-      : "Manager approval was not obtained. It is recommended to obtain approval before proceeding. (This is a soft warning; the change has been saved.)",
-  });
-});
-
-router.get("/:id/eed-history", auth, async (req, res) => {
-  const revisions = await prisma.eEDRevision.findMany({
-    where: { taskId: req.params.id },
-    orderBy: { changedAt: "desc" },
-  });
-  res.json(revisions);
-});
-
-router.delete("/:id", auth, async (req, res) => {
-  const task = await prisma.task.findFirst({ where: { id: req.params.id } });
-  if (!task) return res.status(404).json({ error: "Task not found" });
-  if (req.user.role === "BA" && task.lobId !== req.user.lobId) {
-    return res.status(403).json({ error: "Not authorized" });
-  }
-  await prisma.task.update({ where: { id: task.id }, data: { isDeleted: true } });
-  await logAudit({ entity: "Task", entityId: task.id, action: "DELETE", userId: req.user.id });
-  res.json({ success: true });
+  res.json(logs);
 });
 
 module.exports = router;

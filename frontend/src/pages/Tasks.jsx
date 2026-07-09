@@ -18,6 +18,7 @@ export default function Tasks() {
   const [developers, setDevelopers] = useState([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [deadline, setDeadline] = useState("");
   const [createOpen, setCreateOpen] = useState(false);
   const [assignTask, setAssignTask] = useState(null);
@@ -29,11 +30,12 @@ export default function Tasks() {
   const load = () => {
     api.get("/tasks", { params: {
       search: search || undefined, status: status || undefined, deadline: deadline || undefined,
+      category: categoryFilter || undefined,
       projectId: params.get("projectId") || undefined,
     }}).then((r) => setTasks(r.data));
   };
 
-  useEffect(() => { load(); }, [search, status, deadline]);
+  useEffect(() => { load(); }, [search, status, deadline, categoryFilter]);
   useEffect(() => {
     api.get("/projects").then((r) => setProjects(r.data));
     api.get("/masters/categories").then((r) => setCategories(r.data));
@@ -90,17 +92,22 @@ export default function Tasks() {
           <option value="">All deadlines</option>
           {["ON_TRACK", "DUE_TODAY", "OVERDUE", "COMPLETED_ON_TIME", "COMPLETED_LATE"].map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
         </select>
+        <select value={categoryFilter} onChange={(e) => setCategoryFilter(e.target.value)} className="px-3 py-2.5 rounded-xl border border-line-200 text-sm focus-ring">
+          <option value="">All categories</option>
+          {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
       </div>
 
       {tasks === null ? (
-        <SkeletonTable rows={7} cols={6} />
+        <SkeletonTable rows={7} cols={7} />
       ) : (
       <div className="bg-white rounded-2xl shadow-card overflow-x-auto">
-        <table className="w-full text-sm min-w-[900px]">
+        <table className="w-full text-sm min-w-[1020px]">
           <thead className="bg-paper-50 text-ink-500 text-xs uppercase tracking-wide">
             <tr>
               <th className="text-left px-5 py-3 font-semibold">Task</th>
               <th className="text-left px-5 py-3 font-semibold">Project</th>
+              <th className="text-left px-5 py-3 font-semibold">Category</th>
               <th className="text-left px-5 py-3 font-semibold">Status</th>
               <th className="text-left px-5 py-3 font-semibold">Priority</th>
               <th className="text-left px-5 py-3 font-semibold">Developer</th>
@@ -118,6 +125,7 @@ export default function Tasks() {
                   <div className="text-xs text-ink-300 font-mono">{t.taskCode}</div>
                 </td>
                 <td className="px-5 py-3.5 text-ink-500">{t.project?.name}</td>
+                <td className="px-5 py-3.5 text-ink-500">{t.category?.name || "—"}</td>
                 <td className="px-5 py-3.5"><CaseStatusBadge status={t.caseStatus} /></td>
                 <td className="px-5 py-3.5">{t.priority && <BugPriorityBadge priority={t.priority} />}</td>
                 <td className="px-5 py-3.5 text-ink-500">{t.developer?.name || t.assignedTeam || "Unassigned"}</td>
@@ -147,7 +155,7 @@ export default function Tasks() {
                 </td>
               </tr>
             ))}
-            {tasks.length === 0 && <tr><td colSpan={7} className="px-5 py-12 text-center text-ink-300 text-sm">No tasks found</td></tr>}
+            {tasks.length === 0 && <tr><td colSpan={8} className="px-5 py-12 text-center text-ink-300 text-sm">No tasks found</td></tr>}
           </tbody>
         </table>
       </div>

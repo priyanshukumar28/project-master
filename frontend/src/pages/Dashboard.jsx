@@ -111,7 +111,7 @@ export default function Dashboard() {
             </div>
 
             <div className="bg-white rounded-2xl shadow-card p-5 hover-lift row-enter" style={{ animationDelay: "400ms" }}>
-              <h3 className="font-display font-semibold text-ink-900 mb-4">Modules — Development vs Change Requests vs Bug Fixes</h3>
+              <h3 className="font-display font-semibold text-ink-900 mb-4">Projects - Development vs Change Requests vs Bug Fixes</h3>
               {categoryData.length === 0 ? (
                 <div className="text-sm text-ink-300 py-12 text-center">No tasks yet</div>
               ) : (

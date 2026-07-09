@@ -32,8 +32,10 @@ export default function TaskDetail() {
   useEffect(() => { load(); }, [id]);
   useEffect(() => {
     api.get("/masters/categories").then((r) => setCategories(r.data));
-    api.get("/masters/developers").then((r) => setDevelopers(r.data));
   }, []);
+  useEffect(() => {
+    if (task) api.get("/masters/developers", { params: { lobId: task.lobId } }).then((r) => setDevelopers(r.data));
+  }, [task?.lobId]);
 
   const advance = async () => {
     const to = NEXT_STATUS[task.caseStatus];

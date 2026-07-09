@@ -1,7 +1,7 @@
 const router = require("express").Router();
 const prisma = require("../prisma");
 const { auth, scopeLOB } = require("../middleware/auth");
-const { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode } = require("../utils/helpers");
+const { logAudit, notify, notifyAdmins, computeDeadlineStatus, nextTaskCode } = require("../utils/helpers");
 
 function withDeadline(task) {
   const { deadlineStatus, missedByDays } = computeDeadlineStatus(task);
@@ -67,18 +67,26 @@ router.post("/", auth, async (req, res) => {
     return res.status(403).json({ error: "BA can only create tasks in their own LOB" });
   }
 
+  const effectiveLobId = lobId || project.lobId;
+  const taskCode = await nextTaskCode(effectiveLobId);
   const task = await prisma.task.create({
     data: {
-      taskCode: genCode("TSK"),
+      taskCode,
       taskName: taskName || null,
       projectId,
       categoryId: categoryId || null,
-      lobId: lobId || project.lobId,
+      lobId: effectiveLobId,
       requirementReceived: requirementReceived ? new Date(requirementReceived) : null,
       emailSubject: emailSubject || null,
       remarks: remarks || null,
       createdById: req.user.id,
       caseStatus: "PENDING",
+    },
+    include: {
+      project: { select: { id: true, name: true, projectCode: true } },
+      category: true,
+      developer: true,
+      lob: true,
     },
   });
   await prisma.taskStatusHistory.create({
@@ -139,6 +147,12 @@ router.post("/:id/assign", auth, async (req, res) => {
   }
   const task = await prisma.task.findFirst({ where: { id: req.params.id, isDeleted: false } });
   if (!task) return res.status(404).json({ error: "Task not found" });
+
+  const developer = await prisma.developer.findUnique({ where: { id: developerId } });
+  if (!developer) return res.status(404).json({ error: "Developer not found" });
+  if (developer.lobId && developer.lobId !== task.lobId) {
+    return res.status(400).json({ error: "This developer is registered under a different Line of Business" });
+  }
 
   const updated = await prisma.task.update({
     where: { id: task.id },

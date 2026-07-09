@@ -1,7 +1,7 @@
 const router = require("express").Router();
 const prisma = require("../prisma");
 const { auth, requireAdmin, scopeLOB } = require("../middleware/auth");
-const { logAudit, genCode } = require("../utils/helpers");
+const { logAudit, nextProjectCode } = require("../utils/helpers");
 
 router.get("/", auth, async (req, res) => {
   const { search, status, lobId } = req.query;
@@ -43,9 +43,10 @@ router.post("/", auth, async (req, res) => {
   if (req.user.role === "BA" && lobId !== req.user.lobId) {
     return res.status(403).json({ error: "BA can only create projects within their own LOB" }); // BR-03
   }
+  const projectCode = await nextProjectCode(lobId);
   const project = await prisma.project.create({
     data: {
-      projectCode: genCode("PRJ"),
+      projectCode,
       name,
       description: description || null,
       status: status || "PLANNING",
@@ -56,17 +57,26 @@ router.post("/", auth, async (req, res) => {
       expectedEndDate: expectedEndDate ? new Date(expectedEndDate) : null,
       remarks: remarks || null,
     },
+    include: { lob: true, ba: { select: { id: true, name: true } } },
   });
   await logAudit({ entity: "Project", entityId: project.id, action: "CREATE", userId: req.user.id, newValue: name });
   res.status(201).json(project);
 });
 
-// BR-07 style ownership check + BR-02 status lifecycle
+// BR-07 style ownership check + BR-02 status lifecycle. Also handles full edit (BR-01 amendments)
+// including reassigning the Business Analyst — baId must belong to a BA registered under this LOB.
 router.patch("/:id", auth, async (req, res) => {
   const project = await prisma.project.findFirst({ where: { id: req.params.id, isDeleted: false } });
   if (!project) return res.status(404).json({ error: "Project not found" });
   if (req.user.role === "BA" && project.lobId !== req.user.lobId) {
     return res.status(403).json({ error: "Not authorized to edit this project" }); // BR-03
+  }
+
+  if (req.body.baId) {
+    const ba = await prisma.user.findFirst({ where: { id: req.body.baId, role: "BA" } });
+    if (!ba || ba.lobId !== project.lobId) {
+      return res.status(400).json({ error: "Selected Business Analyst is not registered under this project's LOB" });
+    }
   }
 
   const fields = ["name", "description", "status", "businessOwner", "baId", "startDate", "expectedEndDate", "remarks"];
@@ -76,7 +86,11 @@ router.patch("/:id", auth, async (req, res) => {
       data[f] = f.includes("Date") && req.body[f] ? new Date(req.body[f]) : req.body[f];
     }
   }
-  const updated = await prisma.project.update({ where: { id: project.id }, data });
+  const updated = await prisma.project.update({
+    where: { id: project.id },
+    data,
+    include: { lob: true, ba: { select: { id: true, name: true } } },
+  });
 
   for (const f of Object.keys(data)) {
     if (String(project[f]) !== String(data[f])) {
@@ -113,7 +127,10 @@ router.delete("/:id", auth, async (req, res) => {
 
 // Project-level dashboard (BR-21)
 router.get("/:id/dashboard", auth, async (req, res) => {
-  const project = await prisma.project.findFirst({ where: { id: req.params.id, ...scopeLOB(req) } });
+  const project = await prisma.project.findFirst({
+    where: { id: req.params.id, ...scopeLOB(req) },
+    include: { lob: true, ba: { select: { id: true, name: true } } },
+  });
   if (!project) return res.status(404).json({ error: "Project not found" });
 
   const tasks = await prisma.task.findMany({ where: { projectId: project.id, isDeleted: false } });

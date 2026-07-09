@@ -6,7 +6,9 @@ const { computeDeadlineStatus } = require("../utils/helpers");
 
 function toCsv(res, filename, rows) {
   if (!rows.length) return res.status(200).send("No data");
-  const parser = new Parser({ fields: Object.keys(rows[0]) });
+  const fieldSet = new Set();
+  for (const row of rows) for (const k of Object.keys(row)) fieldSet.add(k);
+  const parser = new Parser({ fields: [...fieldSet] });
   const csv = parser.parse(rows);
   res.header("Content-Type", "text/csv");
   res.attachment(filename);
@@ -123,6 +125,40 @@ router.get("/:type", auth, async (req, res) => {
       map[key] = (map[key] || 0) + 1;
     }
     rows = Object.entries(map).map(([Month, Completed]) => ({ Month, Completed }));
+  } else if (type === "projectBreakdown") {
+    // Pivot: one row per project, one column per active category, plus a Total column —
+    // e.g. how many Change Requests / Development / Bug Fixes / Maintenance / Production
+    // Movement items each project has.
+    const categories = await prisma.category.findMany({ where: { active: true }, orderBy: { name: "asc" } });
+    const projects = await prisma.project.findMany({
+      where: { isDeleted: false, ...lobFilter },
+      include: { lob: true },
+    });
+    const tasks = await prisma.task.findMany({
+      where: { isDeleted: false, ...lobFilter },
+      select: { projectId: true, categoryId: true },
+    });
+    const tasksByProject = {};
+    for (const t of tasks) {
+      tasksByProject[t.projectId] = tasksByProject[t.projectId] || {};
+      const key = t.categoryId || "uncategorized";
+      tasksByProject[t.projectId][key] = (tasksByProject[t.projectId][key] || 0) + 1;
+    }
+    rows = projects.map((p) => {
+      const counts = tasksByProject[p.id] || {};
+      const row = { ProjectCode: p.projectCode, Project: p.name, LOB: p.lob.name };
+      let total = 0;
+      for (const c of categories) {
+        const n = counts[c.id] || 0;
+        row[c.name] = n;
+        total += n;
+      }
+      const uncategorized = counts["uncategorized"] || 0;
+      if (uncategorized) row["Uncategorized"] = uncategorized;
+      total += uncategorized;
+      row.Total = total;
+      return row;
+    });
   } else {
     return res.status(400).json({ error: "Unknown report type" });
   }

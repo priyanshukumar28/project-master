@@ -55,13 +55,17 @@ enum TaskPriority {
 }
 
 model LOB {
-  id        String    @id @default(cuid())
-  name      String    @unique
-  createdAt DateTime  @default(now())
-  users     User[]
-  projects  Project[]
-  tasks     Task[]
-  bugs      Bug[]
+  id           String    @id @default(cuid())
+  name         String    @unique
+  code         String?   @unique
+  createdAt    DateTime  @default(now())
+  users        User[]
+  projects     Project[]
+  tasks        Task[]
+  bugs         Bug[]
+  developers   Developer[]
+  projectSeq   Int       @default(0) @map("project_seq")
+  taskSeq      Int       @default(0) @map("task_seq")
 
   @@map("lobs")
 }
@@ -89,13 +93,16 @@ model User {
 
 model Developer {
   id        String   @id @default(cuid())
-  name      String   @unique
+  name      String
   email     String?
+  lobId     String?  @map("lob_id")
+  lob       LOB?     @relation(fields: [lobId], references: [id])
   active    Boolean  @default(true)
   createdAt DateTime @default(now()) @map("created_at")
   tasks     Task[]
   bugs      Bug[]
 
+  @@unique([name, lobId])
   @@map("developers")
 }
 
