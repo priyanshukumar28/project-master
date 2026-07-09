@@ -3,11 +3,11 @@ import { useParams, Link, useNavigate } from "react-router-dom";
 import api from "../api/client";
 import Spinner from "../components/Spinner";
 import { CaseStatusBadge, DeadlineBadge, BugPriorityBadge } from "../components/Badges";
-import { ArrowLeft, Pencil, Trash2, UserPlus, ArrowRightCircle, Clock } from "lucide-react";
+import { ArrowLeft, Pencil, Trash2, UserPlus, ArrowRightCircle, Clock, RotateCcw } from "lucide-react";
 import Modal from "../components/Modal";
 
 const NEXT_STATUS = {
-  PENDING: "ASSIGNED", ASSIGNED: "WIP", WIP: "COMPLETED", COMPLETED: "UAT", UAT: "LIVE",
+  PENDING: "ASSIGNED", ASSIGNED: "WIP", WIP: "COMPLETED", COMPLETED: "UAT", UAT: "LIVE", REOPENED: "WIP",
 };
 const PRIORITIES = ["CRITICAL", "HIGH", "MEDIUM", "LOW"];
 
@@ -24,6 +24,8 @@ export default function TaskDetail() {
   const [editOpen, setEditOpen] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
   const [eedOpen, setEedOpen] = useState(false);
+  const [reopenOpen, setReopenOpen] = useState(false);
+  const [uatOpen, setUatOpen] = useState(false);
 
   const load = () => api.get(`/tasks/${id}`).then((r) => setTask(r.data));
 
@@ -75,11 +77,17 @@ export default function TaskDetail() {
             {task.caseStatus === "PENDING" && (
               <ActionBtn onClick={() => setAssignOpen(true)} icon={UserPlus} label="Assign" />
             )}
-            {NEXT_STATUS[task.caseStatus] && task.caseStatus !== "PENDING" && (
+            {NEXT_STATUS[task.caseStatus] && task.caseStatus !== "PENDING" && task.caseStatus !== "UAT" && (
               <ActionBtn onClick={advance} icon={ArrowRightCircle} label={`Move to ${NEXT_STATUS[task.caseStatus]}`} />
+            )}
+            {task.caseStatus === "UAT" && (
+              <ActionBtn onClick={() => setUatOpen(true)} icon={ArrowRightCircle} label="Complete UAT" />
             )}
             {task.expectedEndDate && (
               <ActionBtn onClick={() => setEedOpen(true)} icon={Clock} label="Revise EED" />
+            )}
+            {["COMPLETED", "LIVE"].includes(task.caseStatus) && (
+              <ActionBtn onClick={() => setReopenOpen(true)} icon={RotateCcw} label="Reopen" />
             )}
             <ActionBtn onClick={() => setEditOpen(true)} icon={Pencil} label="Edit" primary />
             <button onClick={remove} className="p-2.5 rounded-xl border border-line-200 text-rose-600 hover:bg-rose-50 focus-ring press-scale transition-colors">
@@ -173,6 +181,20 @@ export default function TaskDetail() {
       <EditModal task={task} categories={categories} open={editOpen} onClose={() => setEditOpen(false)} onDone={load} />
       <AssignModal task={task} developers={developers} open={assignOpen} onClose={() => setAssignOpen(false)} onDone={load} />
       <EedModal task={task} open={eedOpen} onClose={() => setEedOpen(false)} onDone={load} />
+      <ReopenModal
+        task={task}
+        open={reopenOpen}
+        onClose={() => setReopenOpen(false)}
+        onDone={load}
+        onReopened={() => setEedOpen(true)}
+      />
+      <UatModal
+        task={task}
+        open={uatOpen}
+        onClose={() => setUatOpen(false)}
+        onDone={load}
+        onFailed={() => setEedOpen(true)}
+      />
     </div>
   );
 }
@@ -372,6 +394,116 @@ function AssignModal({ task, developers, open, onClose, onDone }) {
         {error && <div className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg">{error}</div>}
         <button type="submit" className="w-full bg-aa-blue-600 hover:bg-aa-blue-700 text-white font-semibold py-2.5 rounded-xl focus-ring press-scale">
           Assign & Move to Assigned
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+function UatModal({ task, open, onClose, onDone, onFailed }) {
+  const [result, setResult] = useState("");
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => { setResult(""); setReason(""); setError(""); }, [open]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (submitting) return;
+    if (!result) { setError("Select whether UAT passed or failed."); return; }
+    if (result === "FAIL" && !reason.trim()) { setError("A reason is required when UAT fails."); return; }
+    setSubmitting(true);
+    setError("");
+    try {
+      await api.post(`/tasks/${task.id}/status`, {
+        toStatus: result === "PASS" ? "LIVE" : "REOPENED",
+        uatResult: result,
+        note: result === "FAIL" ? reason.trim() : undefined,
+      });
+      onClose();
+      onDone();
+      if (result === "FAIL") onFailed?.();
+    } catch (err) {
+      setError(err.response?.data?.error || "Could not record UAT result");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Complete UAT">
+      <form onSubmit={submit} className="space-y-4">
+        <p className="text-xs text-ink-500 bg-paper-100 rounded-lg px-3 py-2">
+          A UAT result is required before this task can leave UAT. Pass moves it to Live; Fail reopens it.
+        </p>
+        <div>
+          <label className="block text-sm font-medium text-ink-700 mb-1.5">UAT result</label>
+          <div className="flex gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <input type="radio" name="uatResult" value="PASS" checked={result === "PASS"} onChange={(e) => setResult(e.target.value)} /> Pass
+            </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input type="radio" name="uatResult" value="FAIL" checked={result === "FAIL"} onChange={(e) => setResult(e.target.value)} /> Fail — something is remaining
+            </label>
+          </div>
+        </div>
+        {result === "FAIL" && (
+          <div>
+            <label className="block text-sm font-medium text-ink-700 mb-1.5">Reason (required)</label>
+            <textarea required rows={3} value={reason} onChange={(e) => setReason(e.target.value)}
+              className="w-full px-3.5 py-2.5 rounded-xl border border-line-200 text-sm focus-ring" />
+          </div>
+        )}
+        {error && <div className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg">{error}</div>}
+        <button type="submit" disabled={submitting} className="w-full bg-aa-blue-600 hover:bg-aa-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl focus-ring press-scale">
+          {submitting ? "Saving…" : "Submit UAT Result"}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+function ReopenModal({ task, open, onClose, onDone, onReopened }) {
+  const [reason, setReason] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => { setReason(""); setError(""); }, [open]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (submitting) return;
+    if (!reason.trim()) { setError("A reason is required to reopen this task."); return; }
+    setSubmitting(true);
+    setError("");
+    try {
+      await api.post(`/tasks/${task.id}/status`, { toStatus: "REOPENED", note: reason.trim() });
+      onClose();
+      onDone();
+      onReopened?.();
+    } catch (err) {
+      setError(err.response?.data?.error || "Could not reopen task");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Reopen Task">
+      <form onSubmit={submit} className="space-y-4">
+        <p className="text-xs text-ink-500 bg-paper-100 rounded-lg px-3 py-2">
+          Reopening moves this task from {task?.caseStatus} back to WIP. The reason is stored as the task's
+          Reason For Delay — follow up by revising the Expected End Date.
+        </p>
+        <div>
+          <label className="block text-sm font-medium text-ink-700 mb-1.5">Reason for reopening (required)</label>
+          <textarea required rows={3} value={reason} onChange={(e) => setReason(e.target.value)}
+            className="w-full px-3.5 py-2.5 rounded-xl border border-line-200 text-sm focus-ring" />
+        </div>
+        {error && <div className="text-sm text-rose-600 bg-rose-50 px-3 py-2 rounded-lg">{error}</div>}
+        <button type="submit" disabled={submitting} className="w-full bg-aa-blue-600 hover:bg-aa-blue-700 disabled:opacity-60 text-white font-semibold py-2.5 rounded-xl focus-ring press-scale">
+          {submitting ? "Reopening…" : "Reopen Task"}
         </button>
       </form>
     </Modal>

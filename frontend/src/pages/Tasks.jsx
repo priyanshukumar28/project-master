@@ -7,7 +7,7 @@ import { CaseStatusBadge, DeadlineBadge, BugPriorityBadge } from "../components/
 import { Plus, Search, UserPlus, ArrowRightCircle, History, Clock } from "lucide-react";
 
 const NEXT_STATUS = {
-  PENDING: "ASSIGNED", ASSIGNED: "WIP", WIP: "COMPLETED", COMPLETED: "UAT", UAT: "LIVE",
+  PENDING: "ASSIGNED", ASSIGNED: "WIP", WIP: "COMPLETED", COMPLETED: "UAT", UAT: "LIVE", REOPENED: "WIP",
 };
 
 export default function Tasks() {
@@ -130,8 +130,14 @@ export default function Tasks() {
                     {t.caseStatus === "PENDING" && (
                       <IconBtn title="Assign developer" onClick={() => setAssignTask(t)}><UserPlus size={15} /></IconBtn>
                     )}
-                    {NEXT_STATUS[t.caseStatus] && t.caseStatus !== "PENDING" && (
+                    {NEXT_STATUS[t.caseStatus] && t.caseStatus !== "PENDING" && t.caseStatus !== "UAT" && (
                       <IconBtn title={`Move to ${NEXT_STATUS[t.caseStatus]}`} onClick={() => advance(t)}><ArrowRightCircle size={15} /></IconBtn>
+                    )}
+                    {t.caseStatus === "UAT" && (
+                      <Link to={`/tasks/${t.id}`} title="Complete UAT (Pass/Fail required)"
+                        className="p-2 rounded-lg border border-line-200 text-ink-500 hover:bg-paper-100 hover:text-aa-blue-600 hover:border-aa-blue-200 focus-ring press-scale transition-colors inline-flex">
+                        <ArrowRightCircle size={15} />
+                      </Link>
                     )}
                     {t.expectedEndDate && (
                       <IconBtn title="Revise expected end date" onClick={() => setEedTask(t)}><Clock size={15} /></IconBtn>

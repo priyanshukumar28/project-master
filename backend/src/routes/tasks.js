@@ -145,6 +145,8 @@ router.post("/:id/assign", auth, async (req, res) => {
       developerId,
       developerAssignedAt: new Date(developerAssignedAt),
       expectedEndDate: new Date(expectedEndDate),
+      // Business rule: Developer Req. Received Date is captured the moment a task is assigned.
+      developerReqReceivedDate: task.developerReqReceivedDate || new Date(),
       caseStatus: "ASSIGNED",
     },
   });
@@ -160,7 +162,7 @@ const VALID_TRANSITIONS = {
   PENDING: ["ASSIGNED"],
   ASSIGNED: ["WIP"],
   WIP: ["COMPLETED"],
-  COMPLETED: ["UAT"],
+  COMPLETED: ["UAT", "REOPENED"],
   UAT: ["LIVE", "REOPENED"],
   LIVE: ["REOPENED"],
   REOPENED: ["WIP"],
@@ -179,10 +181,52 @@ router.post("/:id/status", auth, async (req, res) => {
     return res.status(400).json({ error: "Developer assignment fields must be set first (BR-08)" });
   }
 
+  // Leaving UAT is gated on an explicit Pass/Fail result — Pass must go Live, Fail must Reopen.
+  if (task.caseStatus === "UAT" && (toStatus === "LIVE" || toStatus === "REOPENED")) {
+    if (!uatResult || !["PASS", "FAIL"].includes(uatResult)) {
+      return res.status(400).json({ error: "UAT result (Pass or Fail) is required" });
+    }
+    if (uatResult === "PASS" && toStatus !== "LIVE") {
+      return res.status(400).json({ error: "A passed UAT must move to Live" });
+    }
+    if (uatResult === "FAIL" && toStatus !== "REOPENED") {
+      return res.status(400).json({ error: "A failed UAT must reopen the task" });
+    }
+  }
+
+  // Reopening from UAT, Completed, or Live requires a mandatory reason — it becomes the task's
+  // Reason For Delay, and the Expected End Date should then be revised via /revise-eed.
+  if (toStatus === "REOPENED") {
+    if (!["UAT", "COMPLETED", "LIVE"].includes(task.caseStatus)) {
+      return res.status(400).json({ error: "Only tasks in UAT, Completed, or Live can be reopened" });
+    }
+    if (!note || !note.trim()) {
+      return res.status(400).json({ error: "A reason is required to reopen a task" });
+    }
+  }
+
   const data = { caseStatus: toStatus };
-  if (toStatus === "UAT" && uatResult) data.uatResult = uatResult;
+  if (uatResult) data.uatResult = uatResult;
+  // Business rule: Start Date (Developer) reflects when work actually starts (WIP), not when assigned.
+  if (toStatus === "WIP") data.developerAssignedAt = new Date();
   if (toStatus === "LIVE") data.actualCompletionAt = new Date();
-  if (toStatus === "REOPENED") data.actualCompletionAt = null;
+  if (toStatus === "REOPENED") {
+    data.actualCompletionAt = null;
+    data.reasonForDelay = note.trim();
+  }
+
+  // Business rule: Delivery Date is captured whenever a task is pushed to UAT or Live.
+  if (toStatus === "UAT" || toStatus === "LIVE") {
+    const deliveredAt = new Date();
+    data.deliveryDate = deliveredAt;
+
+    // If this task was reopened at any point in its history, this (re)delivery is the
+    // "revised" delivery — captured in Revised Date rather than only overwriting Delivery Date.
+    const wasReopened = await prisma.taskStatusHistory.findFirst({
+      where: { taskId: task.id, toStatus: "REOPENED" },
+    });
+    if (wasReopened) data.revisedDate = deliveredAt;
+  }
 
   const updated = await prisma.task.update({ where: { id: task.id }, data });
   await prisma.taskStatusHistory.create({
@@ -198,7 +242,10 @@ router.post("/:id/status", auth, async (req, res) => {
     action: "STATUS_CHANGE",
   });
   if (task.createdById) {
-    await notify(task.createdById, `Task ${task.taskCode} moved to ${toStatus}`, "STATUS_CHANGE");
+    const msg = toStatus === "REOPENED"
+      ? `Task ${task.taskCode} was reopened: ${note.trim()}`
+      : `Task ${task.taskCode} moved to ${toStatus}`;
+    await notify(task.createdById, msg, "STATUS_CHANGE");
   }
   res.json(withDeadline(updated));
 });
