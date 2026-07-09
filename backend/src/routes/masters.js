@@ -1,105 +1,109 @@
+const router = require("express").Router();
 const prisma = require("../prisma");
+const { auth, requireAdmin, scopeLOB } = require("../middleware/auth");
 
-async function logAudit({ entity, entityId, field, oldValue, newValue, userId, action }) {
-  return prisma.auditLog.create({
-    data: {
-      entity,
-      entityId,
-      field: field || null,
-      oldValue: oldValue === undefined || oldValue === null ? null : String(oldValue),
-      newValue: newValue === undefined || newValue === null ? null : String(newValue),
-      userId: userId || null,
-      action,
-    },
-  });
+function slugCode(name) {
+  return (name || "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "")
+    .slice(0, 4) || "GEN";
 }
 
-async function notify(userId, message, type) {
-  if (!userId) return;
-  return prisma.notification.create({ data: { userId, message, type } });
-}
-
-// Fans a notification out to every active Admin (e.g. CTO). Skips excludeUserId so an admin
-// who personally triggered the action doesn't get a duplicate of their own notification.
-async function notifyAdmins(message, type, excludeUserId) {
-  const admins = await prisma.user.findMany({
-    where: { role: "ADMIN", active: true, ...(excludeUserId ? { id: { not: excludeUserId } } : {}) },
-    select: { id: true },
-  });
-  if (!admins.length) return;
-  return prisma.notification.createMany({
-    data: admins.map((a) => ({ userId: a.id, message, type })),
-  });
-}
-
-// BR-12 / BR-13: derive deadline/SLA status for a task
-function computeDeadlineStatus(task) {
-  const now = new Date();
-  const eed = task.expectedEndDate ? new Date(task.expectedEndDate) : null;
-  const isComplete = task.caseStatus === "LIVE";
-
-  if (!eed) return { deadlineStatus: "NOT_SCHEDULED", missedByDays: null };
-
-  if (isComplete) {
-    // Prefer the real delivery date (from the tracker / import) over actualCompletionAt
-    // (only set when the app itself drives the LIVE transition) over "now" as a last resort.
-    const reference = task.deliveryDate || task.actualCompletionAt || now;
-    const completedAt = new Date(reference);
-    const eedDay = eed.toDateString();
-    const completedDay = completedAt.toDateString();
-
-    // Same calendar day as Expected End Date = on time, no matter what the clock says.
-    if (completedDay === eedDay) return { deadlineStatus: "COMPLETED_ON_TIME", missedByDays: 0 };
-
-    const diffDays = Math.floor((new Date(completedDay) - new Date(eedDay)) / (1000 * 60 * 60 * 24));
-    if (diffDays > 0) return { deadlineStatus: "COMPLETED_LATE", missedByDays: diffDays };
-    return { deadlineStatus: "COMPLETED_ON_TIME", missedByDays: 0 };
-  }
-
-  const today = new Date(now.toDateString());
-  const dueDate = new Date(eed.toDateString());
-  if (dueDate.getTime() === today.getTime()) return { deadlineStatus: "DUE_TODAY", missedByDays: 0 };
-  if (dueDate.getTime() < today.getTime()) {
-    const diffDays = Math.floor((today - dueDate) / (1000 * 60 * 60 * 24));
-    return { deadlineStatus: "OVERDUE", missedByDays: diffDays };
-  }
-  return { deadlineStatus: "ON_TRACK", missedByDays: null };
-}
-
-function genCode(prefix) {
-  const ts = Date.now().toString(36).toUpperCase();
-  const rand = Math.floor(Math.random() * 900 + 100);
-  return `${prefix}-${ts}${rand}`;
-}
-
-function slugFromName(name) {
-  return (name || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4) || "GEN";
-}
-
-async function ensureLobCode(lob) {
-  if (lob.code) return lob.code;
-  let code = slugFromName(lob.name);
+async function uniqueLobCode(base) {
+  let code = base;
   let n = 1;
-  // Guard against colliding with another LOB's existing code.
-  while (await prisma.lOB.findFirst({ where: { code, id: { not: lob.id } } })) {
+  while (await prisma.lOB.findUnique({ where: { code } })) {
     n++;
-    code = `${slugFromName(lob.name)}${n}`;
+    code = `${base}${n}`;
   }
-  await prisma.lOB.update({ where: { id: lob.id }, data: { code } });
   return code;
 }
 
-// LOB-scoped, gap-free sequential codes, e.g. PRJ-RSA-0001, TSK-RSA-0001.
-// Uses a single atomic UPDATE ... increment, so it's safe under concurrent requests.
-async function nextProjectCode(lobId) {
-  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { projectSeq: { increment: 1 } } });
-  const code = await ensureLobCode(lob);
-  return `PRJ-${code}-${String(lob.projectSeq).padStart(4, "0")}`;
-}
-async function nextTaskCode(lobId) {
-  const lob = await prisma.lOB.update({ where: { id: lobId }, data: { taskSeq: { increment: 1 } } });
-  const code = await ensureLobCode(lob);
-  return `TSK-${code}-${String(lob.taskSeq).padStart(4, "0")}`;
-}
+// LOB
+router.get("/lobs", auth, async (req, res) => {
+  res.json(await prisma.lOB.findMany({ orderBy: { name: "asc" } }));
+});
+router.post("/lobs", auth, requireAdmin, async (req, res) => {
+  const name = (req.body.name || "").trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+  const code = await uniqueLobCode(slugCode(req.body.code || name));
+  try {
+    res.status(201).json(await prisma.lOB.create({ data: { name, code } }));
+  } catch {
+    res.status(400).json({ error: "LOB already exists" });
+  }
+});
+router.patch("/lobs/:id", auth, requireAdmin, async (req, res) => {
+  const data = {};
+  if (req.body.name !== undefined) data.name = req.body.name;
+  if (req.body.code !== undefined) data.code = slugCode(req.body.code);
+  try {
+    res.json(await prisma.lOB.update({ where: { id: req.params.id }, data }));
+  } catch {
+    res.status(400).json({ error: "That name or code is already in use" });
+  }
+});
 
-module.exports = { logAudit, notify, notifyAdmins, computeDeadlineStatus, genCode, nextProjectCode, nextTaskCode };
+// Categories (BR-06, NFR-05: configurable without code change)
+router.get("/categories", auth, async (req, res) => {
+  res.json(await prisma.category.findMany({ where: { active: true }, orderBy: { name: "asc" } }));
+});
+router.post("/categories", auth, requireAdmin, async (req, res) => {
+  try {
+    res.status(201).json(await prisma.category.create({ data: { name: req.body.name } }));
+  } catch {
+    res.status(400).json({ error: "Category already exists" });
+  }
+});
+router.patch("/categories/:id", auth, requireAdmin, async (req, res) => {
+  res.json(await prisma.category.update({ where: { id: req.params.id }, data: req.body }));
+});
+
+// Developers — LOB-specific (BA sees only their own LOB's developers + unassigned/global ones;
+// Admin sees and manages all, and picks a LOB when creating one).
+router.get("/developers", auth, async (req, res) => {
+  const { lobId } = req.query;
+  const where = { active: true };
+  if (req.user.role === "BA") {
+    where.OR = [{ lobId: req.user.lobId }, { lobId: null }];
+  } else if (lobId) {
+    where.OR = [{ lobId }, { lobId: null }];
+  }
+  res.json(await prisma.developer.findMany({ where, include: { lob: true }, orderBy: { name: "asc" } }));
+});
+router.post("/developers", auth, requireAdmin, async (req, res) => {
+  const name = (req.body.name || "").trim();
+  if (!name) return res.status(400).json({ error: "name is required" });
+  try {
+    res.status(201).json(
+      await prisma.developer.create({
+        data: { name, email: req.body.email || null, lobId: req.body.lobId || null },
+        include: { lob: true },
+      })
+    );
+  } catch {
+    res.status(400).json({ error: "That developer already exists for this LOB" });
+  }
+});
+router.patch("/developers/:id", auth, requireAdmin, async (req, res) => {
+  const data = {};
+  if (req.body.name !== undefined) data.name = req.body.name;
+  if (req.body.email !== undefined) data.email = req.body.email;
+  if (req.body.lobId !== undefined) data.lobId = req.body.lobId || null;
+  if (req.body.active !== undefined) data.active = req.body.active;
+  res.json(await prisma.developer.update({ where: { id: req.params.id }, data, include: { lob: true } }));
+});
+
+// Business Analysts registered under a given LOB — for assigning a project's BA in the edit form.
+router.get("/bas", auth, async (req, res) => {
+  const { lobId } = req.query;
+  if (!lobId) return res.status(400).json({ error: "lobId is required" });
+  const bas = await prisma.user.findMany({
+    where: { role: "BA", lobId, active: true },
+    select: { id: true, name: true, email: true },
+    orderBy: { name: "asc" },
+  });
+  res.json(bas);
+});
+
+module.exports = router;
